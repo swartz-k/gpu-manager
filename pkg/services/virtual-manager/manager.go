@@ -34,6 +34,7 @@ import (
 	"tkestack.io/gpu-manager/pkg/config"
 	"tkestack.io/gpu-manager/pkg/device/nvidia"
 	"tkestack.io/gpu-manager/pkg/runtime"
+	"tkestack.io/gpu-manager/pkg/services/response"
 	"tkestack.io/gpu-manager/pkg/services/watchdog"
 	"tkestack.io/gpu-manager/pkg/types"
 	"tkestack.io/gpu-manager/pkg/utils"
@@ -145,16 +146,20 @@ type VirtualManager struct {
 	cfg                     *config.Config
 	containerRuntimeManager runtime.ContainerRuntimeInterface
 	vDeviceServers          map[string]*grpc.Server
+	responseManager         response.Manager
 }
 
 var _ vcudaapi.VCUDAServiceServer = &VirtualManager{}
 
 //NewVirtualManager returns a new VirtualManager.
-func NewVirtualManager(config *config.Config, runtimeManager runtime.ContainerRuntimeInterface) *VirtualManager {
+func NewVirtualManager(config *config.Config,
+	runtimeManager runtime.ContainerRuntimeInterface,
+	responseManager response.Manager) *VirtualManager {
 	manager := &VirtualManager{
 		cfg:                     config,
 		containerRuntimeManager: runtimeManager,
 		vDeviceServers:          make(map[string]*grpc.Server),
+		responseManager:         responseManager,
 	}
 
 	return manager
@@ -162,11 +167,14 @@ func NewVirtualManager(config *config.Config, runtimeManager runtime.ContainerRu
 
 //NewVirtualManagerForTest returns a new VirtualManager with fake docker
 //client for testing.
-func NewVirtualManagerForTest(config *config.Config, runtimeManager runtime.ContainerRuntimeInterface) *VirtualManager {
+func NewVirtualManagerForTest(config *config.Config,
+	runtimeManager runtime.ContainerRuntimeInterface,
+	responseManager response.Manager) *VirtualManager {
 	manager := &VirtualManager{
 		cfg:                     config,
 		vDeviceServers:          make(map[string]*grpc.Server),
 		containerRuntimeManager: runtimeManager,
+		responseManager:         responseManager,
 	}
 
 	return manager
@@ -194,58 +202,51 @@ func (vm *VirtualManager) Run() {
 func (vm *VirtualManager) vDeviceWatcher(registered chan struct{}) {
 	klog.V(2).Infof("Start vDevice watcher")
 
-	for uid := range watchdog.GetActivePods() {
-		func() {
-			baseDir := filepath.Clean(filepath.Join(vm.cfg.VirtualManagerPath, uid))
-			f, err := os.Open(baseDir)
-			if err != nil {
-				if os.IsNotExist(err) {
-					klog.Warningf("Pod %s was created by old manager, upgrade to new pattern", uid)
-					os.MkdirAll(filepath.Clean(filepath.Join(vm.cfg.VirtualManagerPath, uid)), DEFAULT_DIR_MODE)
-					return
-				}
+	activePods := watchdog.GetActivePods()
+	possibleActiveVm := vm.responseManager.ListAll()
 
-				klog.Fatalf("Can't open %s, error %s", vm.cfg.VirtualManagerPath, err)
-			}
-			defer f.Close()
+	for uid, containerMapping := range possibleActiveVm {
+		_, ok := activePods[uid]
+		if !ok {
+			continue
+		}
 
-			files, err := f.Readdir(-1)
-			if err != nil {
-				klog.Warningf("Read directory for %s failed, error %s", vm.cfg.VirtualManagerPath, err)
-				return
+		for name, resp := range containerMapping {
+			dirName := utils.GetVirtualControllerMountPath(resp)
+			if dirName == "" {
+				klog.Errorf("can't find %s/%s allocResp", uid, name)
+				continue
 			}
 
-			// Compatible
-			for _, file := range files {
-				if !file.IsDir() {
-					continue
-				}
-				dirName := filepath.Clean(filepath.Join(baseDir, file.Name()))
-				if len(filepath.Join(dirName, types.VDeviceSocket)) < 108 {
-					srv := runVDeviceServer(dirName, vm)
-					if srv == nil {
-						klog.Fatalf("Can't recover vDevice server for %s", dirName)
-					}
-
-					klog.V(2).Infof("Recover vDevice server for %s", dirName)
-					vm.Lock()
-					vm.vDeviceServers[dirName] = srv
-					vm.Unlock()
-				} else {
-					klog.Warningf("Ignore directory %s", dirName)
-				}
+			if _, err := os.Stat(dirName); err != nil {
+				klog.V(2).Infof("Skip directory %s", dirName)
+				continue
 			}
 
-			srv := runVDeviceServer(baseDir, vm)
+			if len(filepath.Join(dirName, types.VDeviceSocket)) < 108 {
+				srv := runVDeviceServer(dirName, vm)
+				if srv == nil {
+					klog.Fatalf("Can't recover vDevice server for %s", dirName)
+				}
+
+				klog.V(2).Infof("Recover vDevice server for %s", dirName)
+				vm.Lock()
+				vm.vDeviceServers[dirName] = srv
+				vm.Unlock()
+			} else {
+				klog.Warningf("Ignore directory %s", dirName)
+			}
+
+			srv := runVDeviceServer(dirName, vm)
 			if srv == nil {
-				klog.Fatalf("Can't recover vDevice server for %s", baseDir)
+				klog.Fatalf("Can't recover vDevice server for %s", dirName)
 			}
 
-			klog.V(2).Infof("Recover vDevice server for %s", baseDir)
+			klog.V(2).Infof("Recover vDevice server for %s", dirName)
 			vm.Lock()
-			vm.vDeviceServers[baseDir] = srv
+			vm.vDeviceServers[dirName] = srv
 			vm.Unlock()
-		}()
+		}
 	}
 
 	close(registered)
@@ -270,31 +271,24 @@ func (vm *VirtualManager) garbageCollector() {
 	wait.Forever(func() {
 		needDeleted := make([]string, 0)
 
-		f, err := os.Open(vm.cfg.VirtualManagerPath)
-		if err != nil {
-			klog.Warningf("Can't open %s, error %s", vm.cfg.VirtualManagerPath, err)
-			return
-		}
-		defer f.Close()
-
-		names, err := f.Readdirnames(-1)
-		if err != nil {
-			klog.Warningf("Read directory for %s failed, error %s", vm.cfg.VirtualManagerPath, err)
-			return
-		}
-
 		activePods := watchdog.GetActivePods()
+		possibleActiveVm := vm.responseManager.ListAll()
 
-		for i, name := range names {
-			if _, ok := activePods[name]; !ok {
-				klog.Warningf("Find orphaned pod %s", name)
-				needDeleted = append(needDeleted, names[i])
+		for uid, containerMapping := range possibleActiveVm {
+			if _, ok := activePods[uid]; !ok {
+				for name, resp := range containerMapping {
+					dirName := utils.GetVirtualControllerMountPath(resp)
+					if dirName != "" {
+						klog.Warningf("Find orphaned pod %s/%s", uid, name)
+						needDeleted = append(needDeleted, dirName)
+					}
+				}
 			}
 		}
 
 		for _, dir := range needDeleted {
 			klog.V(2).Infof("Remove directory %s", dir)
-			os.RemoveAll(filepath.Clean(filepath.Join(vm.cfg.VirtualManagerPath, dir)))
+			os.RemoveAll(filepath.Clean(dir))
 		}
 	}, time.Minute)
 }
@@ -367,7 +361,17 @@ func (vm *VirtualManager) process() {
 
 func (vm *VirtualManager) registerVDeviceWithContainerId(podUID, contID string) (*vcudaapi.VDeviceResponse, error) {
 	klog.V(2).Infof("UID: %s, cont: %s want to registration", podUID, contID)
-	baseDir := filepath.Clean(filepath.Join(vm.cfg.VirtualManagerPath, podUID))
+
+	resp := vm.responseManager.GetResp(podUID, contID)
+	if resp == nil {
+		return nil, fmt.Errorf("unable to load allocResp for %s/%s", podUID, contID)
+	}
+
+	baseDir := utils.GetVirtualControllerMountPath(resp)
+	if baseDir == "" {
+		return nil, fmt.Errorf("unable to find virtual manager controller path")
+	}
+
 	pidFilename := filepath.Join(baseDir, contID, PIDS_CONFIG_NAME)
 	configFilename := filepath.Join(baseDir, contID, CONTROLLER_CONFIG_NAME)
 
@@ -390,7 +394,17 @@ func (vm *VirtualManager) registerVDeviceWithContainerId(podUID, contID string) 
 
 func (vm *VirtualManager) registerVDeviceWithContainerName(podUID, contName string) (*vcudaapi.VDeviceResponse, error) {
 	klog.V(2).Infof("UID: %s, contName: %s want to registration", podUID, contName)
-	baseDir := filepath.Clean(filepath.Join(vm.cfg.VirtualManagerPath, podUID))
+
+	resp := vm.responseManager.GetResp(podUID, contName)
+	if resp == nil {
+		return nil, fmt.Errorf("unable to load allocResp for %s/%s", podUID, contName)
+	}
+
+	baseDir := utils.GetVirtualControllerMountPath(resp)
+	if baseDir == "" {
+		return nil, fmt.Errorf("unable to find virtual manager controller path")
+	}
+
 	pidFilename := filepath.Join(baseDir, contName, PIDS_CONFIG_NAME)
 	configFilename := filepath.Join(baseDir, contName, CONTROLLER_CONFIG_NAME)
 
