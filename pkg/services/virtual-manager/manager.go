@@ -182,6 +182,7 @@ func NewVirtualManagerForTest(config *config.Config,
 
 //Run starts a VirtualManager
 func (vm *VirtualManager) Run() {
+	klog.V(2).Infof("VirtualManager run")
 	if len(vm.cfg.VirtualManagerPath) == 0 {
 		klog.Fatalf("Please set virtual manager path")
 	}

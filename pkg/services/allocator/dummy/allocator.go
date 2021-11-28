@@ -43,6 +43,44 @@ func init() {
 type DummyAllocator struct {
 }
 
+func (ta *DummyAllocator) GetPreferredAllocation(ctx context.Context, r *pluginapi.PreferredAllocationRequest) (*pluginapi.PreferredAllocationResponse, error) {
+	return nil, nil
+	//response := &pluginapi.PreferredAllocationResponse{}
+	//for _, req := range r.ContainerRequests {
+	//	klog.V(3).Infof("AvailableDeviceIDs: %q", req.AvailableDeviceIDs)
+	//	klog.V(3).Infof("MustIncludeDeviceIDs: %q", req.MustIncludeDeviceIDs)
+	//	klog.V(3).Infof("AllocationSize: %d", req.AllocationSize)
+	//
+	//	IDs := dp.policy(req)
+	//
+	//	resp := &pluginapi.ContainerPreferredAllocationResponse{
+	//		DeviceIDs: IDs,
+	//	}
+	//
+	//	response.ContainerResponses = append(response.ContainerResponses, resp)
+	//
+	//
+	//	required, err := gpuallocator.NewDevicesFrom(req.MustIncludeDeviceIDs)
+	//	if err != nil {
+	//		return nil, fmt.Errorf("Unable to retrieve list of required devices: %v", err)
+	//	}
+	//
+	//	allocated := m.allocatePolicy.Allocate(available, required, int(req.AllocationSize))
+	//
+	//	var deviceIds []string
+	//	for _, device := range allocated {
+	//		deviceIds = append(deviceIds, device.UUID)
+	//	}
+	//
+	//	resp := &pluginapi.ContainerPreferredAllocationResponse{
+	//		DeviceIDs: deviceIds,
+	//	}
+	//
+	//	response.ContainerResponses = append(response.ContainerResponses, resp)
+	//}
+	//return response, nil
+}
+
 var _ allocator.GPUTopoService = &DummyAllocator{}
 
 //NewDummyAllocator returns a new DummyAllocator

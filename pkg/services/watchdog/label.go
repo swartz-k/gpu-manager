@@ -18,6 +18,7 @@
 package watchdog
 
 import (
+	"context"
 	"os"
 	"regexp"
 	"time"
@@ -117,9 +118,9 @@ func NewNodeLabeler(client v1core.CoreV1Interface, hostname string, labels map[s
 	}
 }
 
-func (nl *nodeLabeler) Run() error {
+func (nl *nodeLabeler) Run(ctx context.Context) error {
 	err := wait.PollImmediate(time.Second, time.Minute, func() (bool, error) {
-		node, err := nl.client.Nodes().Get(nl.hostName, metav1.GetOptions{})
+		node, err := nl.client.Nodes().Get(ctx, nl.hostName, metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -135,7 +136,7 @@ func (nl *nodeLabeler) Run() error {
 			node.Labels[k] = l
 		}
 
-		_, updateErr := nl.client.Nodes().Update(node)
+		_, updateErr := nl.client.Nodes().Update(ctx, node, metav1.UpdateOptions{})
 		if updateErr != nil {
 			if errors.IsConflict(updateErr) {
 				return false, nil

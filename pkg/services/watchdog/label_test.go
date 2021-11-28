@@ -19,6 +19,7 @@ package watchdog
 
 import (
 	"flag"
+	"golang.org/x/net/context"
 	"testing"
 	"time"
 
@@ -34,6 +35,7 @@ func init() {
 }
 
 func TestNodeLabeler(t *testing.T) {
+	ctx := context.Background()
 	flag.Parse()
 	nodeName := "testnode"
 	testKey := "testkey"
@@ -53,7 +55,7 @@ func TestNodeLabeler(t *testing.T) {
 
 	// create nodeLabeler and run
 	nodeLabeler := NewNodeLabeler(k8sclient.CoreV1(), nodeName, labels)
-	go nodeLabeler.Run()
+	go nodeLabeler.Run(ctx)
 
 	// check if nodeLabeler work well
 	err := wait.PollImmediate(time.Second, time.Minute, func() (bool, error) {

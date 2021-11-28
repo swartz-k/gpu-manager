@@ -85,13 +85,15 @@ func NewManager(cfg *config.Config) Manager {
 // Ready tells the manager whether all bundle servers are truely running
 func (m *managerImpl) Ready() bool {
 	readyServers := 0
-
+	klog.V(2).Infof("Waiting for bundleServer %+v ready,", m.bundleServer)
 	for _, ins := range m.bundleServer {
-		if err := utils.WaitForServer(ins.SocketName()); err == nil {
+		err := utils.WaitForServer(ins.SocketName())
+		if err == nil {
 			readyServers++
 			klog.V(2).Infof("Server %s is ready, readyServers: %d", ins.SocketName(), readyServers)
 			continue
 		}
+		klog.V(2).Infof("Server %s is not ready, readyServers: %d",ins.SocketName())
 
 		return false
 	}
@@ -106,7 +108,7 @@ func (m *managerImpl) Run() error {
 
 		return err
 	}
-
+	ctx := context.Background()
 	if m.config.Driver == "" {
 		return fmt.Errorf("you should define a driver")
 	}
@@ -160,12 +162,13 @@ func (m *managerImpl) Run() error {
 	klog.V(2).Infof("Watchdog is running")
 
 	labeler := watchdog.NewNodeLabeler(client.CoreV1(), m.config.Hostname, m.config.NodeLabels)
-	if err := labeler.Run(); err != nil {
+	if err := labeler.Run(ctx); err != nil {
 		return err
 	}
 
 	klog.V(2).Infof("Load container response data")
 	responseManager := response.NewResponseManager()
+	klog.V(2).Infof("New responseManager %s", m.config.DevicePluginPath)
 	if err := responseManager.LoadFromFile(m.config.DevicePluginPath); err != nil {
 		klog.Errorf("can't load container response data, %+#v", err)
 		return err
